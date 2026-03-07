@@ -1,11 +1,16 @@
+import clockwork
+import clockwork_schedule
 import envoy
 import gleam/dynamic/decode
 import gleam/erlang/process
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
+import gleam/time/duration
+import gleam/time/timestamp
 import grom
 import grom/command
 import grom/component/action_row
@@ -20,7 +25,13 @@ import logging
 import storail
 
 type State {
-  State(client: grom.Client, admin_role: String, db: storail.Collection(User))
+  State(
+    client: grom.Client,
+    admin_role: String,
+    db: storail.Collection(User),
+    cron: clockwork.Cron,
+    already_happened: Bool,
+  )
 }
 
 type User {
@@ -53,6 +64,14 @@ pub fn main() -> Nil {
       decoder: user_decoder(),
       config: storail.Config("db"),
     )
+  let cron =
+    clockwork.Cron(
+      minute: clockwork.exactly(0),
+      hour: clockwork.exactly(12),
+      day: clockwork.every_time(),
+      month: clockwork.every_time(),
+      weekday: clockwork.exactly(0),
+    )
 
   let identify =
     client
@@ -61,7 +80,7 @@ pub fn main() -> Nil {
   let assert Ok(data) = gateway.get_data(client)
 
   let gateway_start_result =
-    gateway.new(State(client, admin_role, db), identify, data)
+    gateway.new(State(client, admin_role, db, cron, False), identify, data)
     |> gateway.on_event(do: on_event)
     |> gateway.start
 
@@ -167,6 +186,10 @@ fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
               ]),
             ),
           ),
+          command.SubCommandParameter(command.new_parameter_sub_command(
+            "proximo-pareamento",
+            "Retorna a data do próximo pareamento",
+          )),
         ]),
       ),
     ),
@@ -198,7 +221,7 @@ fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
 }
 
 fn on_interaction_created(state: State, interaction: Interaction) {
-  case echo interaction.data {
+  case interaction.data {
     interaction.CommandExecuted(command) ->
       on_command_executed(state, interaction, command)
     interaction.MessageComponentExecuted(message) ->
@@ -464,6 +487,43 @@ fn on_manage_command(
           interaction.ResponseMessage(
             ..interaction.new_response_message(),
             content: Some(message),
+            flags: Some([interaction.EphemeralResponseMessage]),
+          ),
+        )
+
+      let _response_result =
+        state.client
+        |> interaction.respond(to: interaction, using: response)
+      gateway.continue(state)
+    }
+    [interaction.SubCommandSlashCommandOption(name: "proximo-pareamento", ..)] -> {
+      let next_occurrence = case state.already_happened {
+        False ->
+          clockwork.next_occurrence(
+            given: state.cron,
+            from: timestamp.system_time(),
+            with_offset: duration.hours(-3),
+          )
+
+        True ->
+          clockwork.next_occurrence(
+            given: state.cron,
+            from: timestamp.system_time(),
+            with_offset: duration.hours(-3),
+          )
+          |> clockwork.next_occurrence(
+            given: state.cron,
+            from: _,
+            with_offset: duration.hours(-3),
+          )
+      }
+      let #(unix_seconds, _) =
+        timestamp.to_unix_seconds_and_nanoseconds(next_occurrence)
+      let response =
+        interaction.RespondWithChannelMessageWithSource(
+          interaction.ResponseMessage(
+            ..interaction.new_response_message(),
+            content: Some("<t:" <> int.to_string(unix_seconds) <> ":f>"),
             flags: Some([interaction.EphemeralResponseMessage]),
           ),
         )

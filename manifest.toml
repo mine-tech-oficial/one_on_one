@@ -2,6 +2,8 @@
 # You typically do not need to edit this file
 
 packages = [
+  { name = "clockwork", version = "4.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib", "gleam_time"], otp_app = "clockwork", source = "hex", outer_checksum = "A84AC8734E350EFCCF1336C73F33C7FB2BF6761065D714778905ACF384B0CCB9" },
+  { name = "clockwork_schedule", version = "2.0.0", build_tools = ["gleam"], requirements = ["clockwork", "gleam_erlang", "gleam_otp", "gleam_stdlib", "gleam_time", "logging"], otp_app = "clockwork_schedule", source = "hex", outer_checksum = "9556D6A8DA22F7FD255986A337D8291786BDBE4B92F5F35A4B967CBB1033E43E" },
   { name = "directories", version = "1.2.0", build_tools = ["gleam"], requirements = ["envoy", "gleam_stdlib", "platform", "simplifile"], otp_app = "directories", source = "hex", outer_checksum = "D13090CFCDF6759B87217E8DDD73A75903A700148A82C1D33799F333E249BF9E" },
   { name = "envoy", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "envoy", source = "hex", outer_checksum = "850DA9D29D2E5987735872A2B5C81035146D7FE19EFC486129E44440D03FD832" },
   { name = "exception", version = "2.1.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "exception", source = "hex", outer_checksum = "329D269D5C2A314F7364BD2711372B6F2C58FA6F39981572E5CA68624D291F8C" },
@@ -29,6 +31,8 @@ packages = [
 ]
 
 [requirements]
+clockwork = { version = ">= 4.0.0 and < 5.0.0" }
+clockwork_schedule = { version = ">= 2.0.0 and < 3.0.0" }
 envoy = { version = ">= 1.1.0 and < 2.0.0" }
 gleam_erlang = { version = ">= 1.3.0 and < 2.0.0" }
 gleam_json = { version = ">= 3.1.0 and < 4.0.0" }
