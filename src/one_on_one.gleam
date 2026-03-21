@@ -1,16 +1,15 @@
 import clockwork
-import clockwork_schedule
 import envoy
-import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/int
-import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/otp/actor
 import gleam/result
 import gleam/string
-import gleam/time/duration
 import gleam/time/timestamp
+import graph.{type Graph}
+import graph_db
 import grom
 import grom/command
 import grom/component/action_row
@@ -20,34 +19,25 @@ import grom/gateway
 import grom/guild_member
 import grom/interaction.{type Interaction}
 import grom/message
+import grom/modification
 import grom/user
 import logging
-import storail
+import pairement
+import simplifile
+
+const graph_db_path = "db/graph.csv"
+
+const graph_db_temp_path = "db/temp/graph.csv"
+
+const channel_id_path = "db/channel.txt"
 
 type State {
   State(
     client: grom.Client,
     admin_role: String,
-    db: storail.Collection(User),
-    cron: clockwork.Cron,
-    already_happened: Bool,
+    pairement_manager: process.Subject(pairement.PairementMsg),
+    user_connections: Graph(graph.Undirected, Nil, Nil),
   )
-}
-
-type User {
-  User
-}
-
-fn user_to_json(user: User) -> json.Json {
-  json.string("user")
-}
-
-fn user_decoder() -> decode.Decoder(User) {
-  use variant <- decode.then(decode.string)
-  case variant {
-    "user" -> decode.success(User)
-    _ -> decode.failure(User, "User")
-  }
 }
 
 pub fn main() -> Nil {
@@ -57,13 +47,6 @@ pub fn main() -> Nil {
   let assert Ok(admin_role) = envoy.get("ADMIN_ROLE")
 
   let client = grom.Client(token:)
-  let db =
-    storail.Collection(
-      name: "users",
-      to_json: user_to_json,
-      decoder: user_decoder(),
-      config: storail.Config("db"),
-    )
   let cron =
     clockwork.Cron(
       minute: clockwork.exactly(0),
@@ -77,10 +60,24 @@ pub fn main() -> Nil {
     client
     |> gateway.identify(intents: [])
 
+  let assert Ok(channel_id) =
+    simplifile.read(channel_id_path)
+    |> result.replace_error(Nil)
+    |> result.or(envoy.get("CHANNEL_ID"))
+
   let assert Ok(data) = gateway.get_data(client)
+  let graph = result.unwrap(graph_db.load_graph(graph_db_path), graph.new())
+
+  let assert Ok(actor.Started(data: pairement_manager, ..)) =
+    pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
+    |> actor.start()
 
   let gateway_start_result =
-    gateway.new(State(client, admin_role, db, cron, False), identify, data)
+    gateway.new(
+      State(client, admin_role, pairement_manager, graph),
+      identify,
+      data,
+    )
     |> gateway.on_event(do: on_event)
     |> gateway.start
 
@@ -190,6 +187,33 @@ fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
             "proximo-pareamento",
             "Retorna a data do próximo pareamento",
           )),
+          command.SubCommandParameter(command.new_parameter_sub_command(
+            "testar-pareamento",
+            "Simula um pareamento",
+          )),
+          command.SubCommandParameter(command.new_parameter_sub_command(
+            "fazer-pareamento",
+            "Roda o pareamento",
+          )),
+          command.SubCommandParameter(
+            command.ParameterSubCommand(
+              ..command.new_parameter_sub_command(
+                "definir-canal",
+                "Define o canal a ser postado os pareamentos",
+              ),
+              parameters: Some([
+                command.ChannelParameter(
+                  command.ParameterChannel(
+                    ..command.new_parameter_channel(
+                      "canal",
+                      "Canal onde os pareamentos serão postados",
+                    ),
+                    is_required: True,
+                  ),
+                ),
+              ]),
+            ),
+          ),
         ]),
       ),
     ),
@@ -275,12 +299,7 @@ fn on_message_component_executed(
       ..,
     )) -> {
       let message = case
-        result.try(
-          storail.list(state.db, []),
-          list.try_each(_, fn(user) {
-            storail.delete(storail.key(state.db, user))
-          }),
-        )
+        graph_db.save_graph(graph.new(), graph_db_path, graph_db_temp_path)
       {
         Ok(_) -> ":white_check_mark: Lista limpada com sucesso."
         Error(_) -> ":x: Ocorreu um erro interno."
@@ -300,7 +319,7 @@ fn on_message_component_executed(
         state.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(state)
+      gateway.continue(State(..state, user_connections: graph.new()))
     }
     _ -> gateway.continue(state)
   }
@@ -326,7 +345,18 @@ fn on_register_command(
   use _, user <- get_guild_invokation(state, interaction.invokement_info)
   case command.options {
     [interaction.SubCommandSlashCommandOption(name: "entrar", ..)] -> {
-      let message = case storail.write(storail.key(state.db, user.id), User) {
+      let user_connections = case int.parse(user.id) {
+        Ok(id) ->
+          graph.insert_node(state.user_connections, graph.Node(id, Nil))
+          |> list.fold(graph.nodes(state.user_connections), _, fn(acc, node) {
+            graph.insert_undirected_edge(acc, Nil, node.id, id)
+          })
+        Error(_) -> state.user_connections
+      }
+
+      let message = case
+        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+      {
         Ok(_) -> ":white_check_mark: Você foi registrado na lista!"
         Error(_) -> ":x: Ocorreu um erro interno."
       }
@@ -344,10 +374,17 @@ fn on_register_command(
         state.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(state)
+      gateway.continue(State(..state, user_connections:))
     }
     [interaction.SubCommandSlashCommandOption(name: "sair", ..)] -> {
-      let message = case storail.delete(storail.key(state.db, user.id)) {
+      let user_connections = case int.parse(user.id) {
+        Ok(id) -> graph.remove_node(state.user_connections, id)
+        Error(_) -> state.user_connections
+      }
+
+      let message = case
+        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+      {
         Ok(_) -> ":wave: Você foi removido da lista."
         Error(_) -> ":x: Ocorreu um erro interno."
       }
@@ -365,7 +402,7 @@ fn on_register_command(
         state.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(state)
+      gateway.continue(State(..state, user_connections:))
     }
     _ -> gateway.continue(state)
   }
@@ -380,14 +417,12 @@ fn on_manage_command(
   use <- check_user_is_privileged(state, member, interaction)
   case command.options {
     [interaction.SubCommandSlashCommandOption(name: "listar-usuarios", ..)] -> {
-      let message = case storail.list(state.db, []) {
-        Ok(users) ->
-          users
-          |> list.fold("Aqui estão os usuários na lista:", fn(acc, user) {
-            acc <> "\n" <> "<@" <> user <> ">"
-          })
-        Error(_) -> ":x: Ocorreu um erro interno."
-      }
+      let message =
+        list.fold(
+          graph.nodes(state.user_connections),
+          "Aqui estão os usuários na lista:",
+          fn(acc, user) { acc <> "\n" <> "<@" <> int.to_string(user.id) <> ">" },
+        )
       let response =
         interaction.RespondWithChannelMessageWithSource(
           interaction.ResponseMessage(
@@ -452,7 +487,18 @@ fn on_manage_command(
         ],
       ),
     ] -> {
-      let message = case storail.write(storail.key(state.db, user_id), User) {
+      let user_connections = case int.parse(user_id) {
+        Ok(id) ->
+          graph.insert_node(state.user_connections, graph.Node(id, Nil))
+          |> list.fold(graph.nodes(state.user_connections), _, fn(acc, node) {
+            graph.insert_undirected_edge(acc, Nil, node.id, id)
+          })
+        Error(_) -> state.user_connections
+      }
+
+      let message = case
+        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+      {
         Ok(_) -> ":white_check_mark: Usuário adicionado com sucesso."
         Error(_) -> ":x: Ocorreu um erro interno."
       }
@@ -468,7 +514,8 @@ fn on_manage_command(
       let _response_result =
         state.client
         |> interaction.respond(to: interaction, using: response)
-      gateway.continue(state)
+
+      gateway.continue(State(..state, user_connections:))
     }
     [
       interaction.SubCommandSlashCommandOption(
@@ -478,7 +525,14 @@ fn on_manage_command(
         ],
       ),
     ] -> {
-      let message = case storail.write(storail.key(state.db, user_id), User) {
+      let user_connections = case int.parse(user_id) {
+        Ok(id) -> graph.remove_node(state.user_connections, id)
+        Error(_) -> state.user_connections
+      }
+
+      let message = case
+        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+      {
         Ok(_) -> ":white_check_mark: Usuário removido com sucesso."
         Error(_) -> ":x: Ocorreu um erro interno."
       }
@@ -494,29 +548,12 @@ fn on_manage_command(
       let _response_result =
         state.client
         |> interaction.respond(to: interaction, using: response)
-      gateway.continue(state)
+
+      gateway.continue(State(..state, user_connections:))
     }
     [interaction.SubCommandSlashCommandOption(name: "proximo-pareamento", ..)] -> {
-      let next_occurrence = case state.already_happened {
-        False ->
-          clockwork.next_occurrence(
-            given: state.cron,
-            from: timestamp.system_time(),
-            with_offset: duration.hours(-3),
-          )
-
-        True ->
-          clockwork.next_occurrence(
-            given: state.cron,
-            from: timestamp.system_time(),
-            with_offset: duration.hours(-3),
-          )
-          |> clockwork.next_occurrence(
-            given: state.cron,
-            from: _,
-            with_offset: duration.hours(-3),
-          )
-      }
+      let next_occurrence =
+        process.call(state.pairement_manager, 3000, pairement.GetNextPairement)
       let #(unix_seconds, _) =
         timestamp.to_unix_seconds_and_nanoseconds(next_occurrence)
       let response =
@@ -531,6 +568,99 @@ fn on_manage_command(
       let _response_result =
         state.client
         |> interaction.respond(to: interaction, using: response)
+      gateway.continue(state)
+    }
+    [interaction.SubCommandSlashCommandOption(name: "testar-pareamento", ..)] -> {
+      let response =
+        interaction.RespondWithDeferredChannelMessageWithSource(
+          interaction.ResponseMessage(
+            ..interaction.new_response_message(),
+            flags: Some([interaction.EphemeralResponseMessage]),
+          ),
+        )
+      let _response_result =
+        state.client
+        |> interaction.respond(to: interaction, using: response)
+
+      let msg =
+        process.call(state.pairement_manager, 3000, pairement.SimulatePairement)
+
+      let response =
+        interaction.ModifyOriginalResponse(
+          ..interaction.new_modify_original_response(),
+          content: modification.New(msg),
+        )
+
+      let _response_result =
+        state.client
+        |> interaction.modify_original_response(
+          of: interaction,
+          using: response,
+        )
+
+      gateway.continue(state)
+    }
+    [interaction.SubCommandSlashCommandOption(name: "fazer-pareamento", ..)] -> {
+      let response =
+        interaction.RespondWithDeferredChannelMessageWithSource(
+          interaction.new_response_message(),
+        )
+      let _response_result =
+        state.client
+        |> interaction.respond(to: interaction, using: response)
+
+      let msg =
+        process.call(state.pairement_manager, 3000, pairement.RunPairementMsg)
+
+      let response =
+        interaction.ModifyOriginalResponse(
+          ..interaction.new_modify_original_response(),
+          content: modification.New(msg),
+        )
+
+      let _response_result =
+        state.client
+        |> interaction.modify_original_response(
+          of: interaction,
+          using: response,
+        )
+
+      gateway.continue(state)
+    }
+    [
+      interaction.SubCommandSlashCommandOption(
+        name: "definir-canal",
+        options: [
+          interaction.ChannelSlashCommandOption(name: "canal", channel_id:, ..),
+        ],
+      ),
+    ] -> {
+      let message = case
+        simplifile.write(to: channel_id_path, contents: channel_id)
+      {
+        Ok(_) -> {
+          process.send(
+            state.pairement_manager,
+            pairement.SetChannelId(channel_id:),
+          )
+          ":white_check_mark: Canal alterado com sucesso."
+        }
+        Error(_) -> ":x: Ocorreu um erro interno."
+      }
+
+      let response =
+        interaction.RespondWithChannelMessageWithSource(
+          interaction.ResponseMessage(
+            ..interaction.new_response_message(),
+            content: Some(message),
+            flags: Some([interaction.EphemeralResponseMessage]),
+          ),
+        )
+
+      let _response_result =
+        state.client
+        |> interaction.respond(to: interaction, using: response)
+
       gateway.continue(state)
     }
     _ -> gateway.continue(state)
