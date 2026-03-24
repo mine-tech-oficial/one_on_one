@@ -65,11 +65,20 @@ pub fn main() -> Nil {
     |> result.replace_error(Nil)
     |> result.or(envoy.get("CHANNEL_ID"))
 
+  let _ = simplifile.write(channel_id, to: channel_id_path)
+
   let assert Ok(data) = gateway.get_data(client)
   let graph = result.unwrap(graph_db.load_graph(graph_db_path), graph.new())
 
   let assert Ok(actor.Started(data: pairement_manager, ..)) =
-    pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
+    pairement.new(
+      client,
+      cron,
+      channel_id,
+      channel_id_path,
+      graph_db_path,
+      graph_db_temp_path,
+    )
     |> actor.start()
 
   let gateway_start_result =
