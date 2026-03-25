@@ -37,7 +37,6 @@ pub fn new(
   client: grom.Client,
   cron: clockwork.Cron,
   channel_id: String,
-  channel_id_path: String,
   graph_db_path: String,
   graph_temp_path: String,
 ) -> actor.Builder(State, PairementMsg, process.Subject(PairementMsg)) {
@@ -77,10 +76,7 @@ pub fn new(
         )
     }
     case msg {
-      SetChannelId(channel_id) -> {
-        let _ = simplifile.write(channel_id, to: channel_id_path)
-        actor.continue(State(..state, channel_id:))
-      }
+      SetChannelId(channel_id) -> actor.continue(State(..state, channel_id:))
       GetNextPairement(reply_to:) -> {
         process.send(reply_to, next_occurrence)
         actor.continue(state)

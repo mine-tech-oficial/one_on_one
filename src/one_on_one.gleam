@@ -71,14 +71,7 @@ pub fn main() -> Nil {
   let graph = result.unwrap(graph_db.load_graph(graph_db_path), graph.new())
 
   let assert Ok(actor.Started(data: pairement_manager, ..)) =
-    pairement.new(
-      client,
-      cron,
-      channel_id,
-      channel_id_path,
-      graph_db_path,
-      graph_db_temp_path,
-    )
+    pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
     |> actor.start()
 
   let gateway_start_result =
@@ -311,7 +304,10 @@ fn on_message_component_executed(
         graph_db.save_graph(graph.new(), graph_db_path, graph_db_temp_path)
       {
         Ok(_) -> ":white_check_mark: Lista limpada com sucesso."
-        Error(_) -> ":x: Ocorreu um erro interno."
+        Error(_) -> {
+          logging.log(logging.Error, "Couldn't save graph")
+          ":x: Ocorreu um erro interno."
+        }
       }
 
       let response =
@@ -367,7 +363,10 @@ fn on_register_command(
         graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
       {
         Ok(_) -> ":white_check_mark: Você foi registrado na lista!"
-        Error(_) -> ":x: Ocorreu um erro interno."
+        Error(_) -> {
+          logging.log(logging.Error, "Couldn't save graph")
+          ":x: Ocorreu um erro interno."
+        }
       }
 
       let response =
@@ -395,7 +394,10 @@ fn on_register_command(
         graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
       {
         Ok(_) -> ":wave: Você foi removido da lista."
-        Error(_) -> ":x: Ocorreu um erro interno."
+        Error(_) -> {
+          logging.log(logging.Error, "Couldn't save graph")
+          ":x: Ocorreu um erro interno."
+        }
       }
 
       let response =
@@ -509,7 +511,10 @@ fn on_manage_command(
         graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
       {
         Ok(_) -> ":white_check_mark: Usuário adicionado com sucesso."
-        Error(_) -> ":x: Ocorreu um erro interno."
+        Error(_) -> {
+          logging.log(logging.Error, "Couldn't save graph")
+          ":x: Ocorreu um erro interno."
+        }
       }
       let response =
         interaction.RespondWithChannelMessageWithSource(
@@ -543,7 +548,10 @@ fn on_manage_command(
         graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
       {
         Ok(_) -> ":white_check_mark: Usuário removido com sucesso."
-        Error(_) -> ":x: Ocorreu um erro interno."
+        Error(_) -> {
+          logging.log(logging.Error, "Couldn't save graph")
+          ":x: Ocorreu um erro interno."
+        }
       }
       let response =
         interaction.RespondWithChannelMessageWithSource(
@@ -654,7 +662,10 @@ fn on_manage_command(
           )
           ":white_check_mark: Canal alterado com sucesso."
         }
-        Error(_) -> ":x: Ocorreu um erro interno."
+        Error(_) -> {
+          logging.log(logging.Error, "Couldn't save channel id")
+          ":x: Ocorreu um erro interno."
+        }
       }
 
       let response =
