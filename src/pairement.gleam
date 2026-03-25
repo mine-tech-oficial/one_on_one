@@ -14,7 +14,6 @@ import graph_utils
 import grom
 import grom/message
 import prng/random
-import simplifile
 
 pub type PairementMsg {
   SetChannelId(channel_id: String)

@@ -25,16 +25,13 @@ import logging
 import pairement
 import simplifile
 
-const graph_db_path = "db/graph.csv"
-
-const graph_db_temp_path = "db/temp/graph.csv"
-
-const channel_id_path = "db/channel.txt"
-
 type State {
   State(
     client: grom.Client,
     admin_role: String,
+    graph_db_path: String,
+    graph_db_temp_path: String,
+    channel_id_path: String,
     pairement_manager: process.Subject(pairement.PairementMsg),
     user_connections: Graph(graph.Undirected, Nil, Nil),
   )
@@ -42,6 +39,11 @@ type State {
 
 pub fn main() -> Nil {
   logging.configure()
+
+  let assert Ok(db_path) = envoy.get("DB_PATH")
+  let graph_db_path = db_path <> "/graph.csv"
+  let graph_db_temp_path = db_path <> "/temp/graph.csv"
+  let channel_id_path = db_path <> "/channel.txt"
 
   let assert Ok(token) = envoy.get("BOT_TOKEN")
   let assert Ok(admin_role) = envoy.get("ADMIN_ROLE")
@@ -76,7 +78,15 @@ pub fn main() -> Nil {
 
   let gateway_start_result =
     gateway.new(
-      State(client, admin_role, pairement_manager, graph),
+      State(
+        client,
+        admin_role,
+        graph_db_path,
+        graph_db_temp_path,
+        channel_id_path,
+        pairement_manager,
+        graph,
+      ),
       identify,
       data,
     )
@@ -301,7 +311,11 @@ fn on_message_component_executed(
       ..,
     )) -> {
       let message = case
-        graph_db.save_graph(graph.new(), graph_db_path, graph_db_temp_path)
+        graph_db.save_graph(
+          graph.new(),
+          state.graph_db_path,
+          state.graph_db_temp_path,
+        )
       {
         Ok(_) -> ":white_check_mark: Lista limpada com sucesso."
         Error(_) -> {
@@ -360,7 +374,11 @@ fn on_register_command(
       }
 
       let message = case
-        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+        graph_db.save_graph(
+          user_connections,
+          state.graph_db_path,
+          state.graph_db_temp_path,
+        )
       {
         Ok(_) -> ":white_check_mark: Você foi registrado na lista!"
         Error(_) -> {
@@ -391,7 +409,11 @@ fn on_register_command(
       }
 
       let message = case
-        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+        graph_db.save_graph(
+          user_connections,
+          state.graph_db_path,
+          state.graph_db_temp_path,
+        )
       {
         Ok(_) -> ":wave: Você foi removido da lista."
         Error(_) -> {
@@ -508,7 +530,11 @@ fn on_manage_command(
       }
 
       let message = case
-        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+        graph_db.save_graph(
+          user_connections,
+          state.graph_db_path,
+          state.graph_db_temp_path,
+        )
       {
         Ok(_) -> ":white_check_mark: Usuário adicionado com sucesso."
         Error(_) -> {
@@ -545,7 +571,11 @@ fn on_manage_command(
       }
 
       let message = case
-        graph_db.save_graph(user_connections, graph_db_path, graph_db_temp_path)
+        graph_db.save_graph(
+          user_connections,
+          state.graph_db_path,
+          state.graph_db_temp_path,
+        )
       {
         Ok(_) -> ":white_check_mark: Usuário removido com sucesso."
         Error(_) -> {
@@ -653,7 +683,7 @@ fn on_manage_command(
       ),
     ] -> {
       let message = case
-        simplifile.write(to: channel_id_path, contents: channel_id)
+        simplifile.write(to: state.channel_id_path, contents: channel_id)
       {
         Ok(_) -> {
           process.send(
