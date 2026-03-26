@@ -28,7 +28,7 @@ import simplifile
 type State {
   State(
     client: grom.Client,
-    admin_role: String,
+    admin_roles: List(String),
     graph_db_path: String,
     graph_db_temp_path: String,
     channel_id_path: String,
@@ -46,7 +46,7 @@ pub fn main() -> Nil {
   let channel_id_path = db_path <> "/channel.txt"
 
   let assert Ok(token) = envoy.get("BOT_TOKEN")
-  let assert Ok(admin_role) = envoy.get("ADMIN_ROLE")
+  let assert Ok(admin_roles) = envoy.get("ADMIN_ROLES")
 
   let client = grom.Client(token:)
   let cron =
@@ -80,7 +80,7 @@ pub fn main() -> Nil {
     gateway.new(
       State(
         client,
-        admin_role,
+        string.split(admin_roles, on: ","),
         graph_db_path,
         graph_db_temp_path,
         channel_id_path,
@@ -737,7 +737,11 @@ fn check_user_is_privileged(
   interaction: Interaction,
   f: fn() -> gateway.Next(State),
 ) -> gateway.Next(State) {
-  case list.contains(member.roles, state.admin_role) {
+  case
+    list.fold(state.admin_roles, False, fn(acc, role) {
+      acc || list.contains(member.roles, role)
+    })
+  {
     False -> {
       let response =
         interaction.RespondWithChannelMessageWithSource(

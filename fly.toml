@@ -11,7 +11,7 @@ primary_region = 'iad'
   min_machines_running = 1
   processes = ['app']
 
-[mounts]
+[[mounts]]
   source = "volume"
   destination = "/data"
   initial_size = "1gb"
