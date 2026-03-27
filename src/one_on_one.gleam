@@ -145,7 +145,7 @@ fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
     command.CreateGlobalSlash(
       command.CreateGlobalSlashCommand(
         ..command.new_create_global_slash_command(
-          named: "manage-pairs",
+          named: "manage",
           description: "Comandos de administração do sistema de pareamento",
         ),
         parameters: Some([
@@ -351,7 +351,7 @@ fn on_slash_command_executed(
 ) {
   case command.name {
     "register" -> on_register_command(state, interaction, command)
-    "manage-pairs" -> on_manage_command(state, interaction, command)
+    "manage" -> on_manage_command(state, interaction, command)
     _ -> gateway.continue(state)
   }
 }
