@@ -16,6 +16,7 @@ import grom/component/action_row
 import grom/component/button
 import grom/component/text_display
 import grom/gateway
+import grom/gateway/intent
 import grom/guild_member
 import grom/interaction.{type Interaction}
 import grom/message
@@ -60,7 +61,7 @@ pub fn main() -> Nil {
 
   let identify =
     client
-    |> gateway.identify(intents: [])
+    |> gateway.identify(intents: [intent.GuildMembers])
 
   let assert Ok(channel_id) =
     simplifile.read(channel_id_path)
@@ -116,6 +117,8 @@ fn on_event(state: State, event: gateway.Event) {
     gateway.AllShardsReadyEvent(ready) -> on_ready(state, ready)
     gateway.InteractionCreatedEvent(interaction) ->
       on_interaction_created(state, interaction)
+    gateway.GuildMemberDeletedEvent(event) ->
+      on_guild_member_leave(state, event)
     _ -> gateway.continue(state)
   }
 }
@@ -254,6 +257,29 @@ fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
   }
 
   gateway.continue(state)
+}
+
+fn on_guild_member_leave(
+  state: State,
+  event: gateway.GuildMemberDeletedMessage,
+) -> gateway.Next(State) {
+  case int.parse(event.user.id) {
+    Ok(id) -> {
+      let user_connections = graph.remove_node(state.user_connections, id)
+      case
+        graph_db.save_graph(
+          user_connections,
+          state.graph_db_path,
+          state.graph_db_temp_path,
+        )
+      {
+        Ok(_) -> Nil
+        Error(_) -> logging.log(logging.Error, "Couldn't save graph")
+      }
+      gateway.continue(State(..state, user_connections:))
+    }
+    Error(_) -> gateway.continue(state)
+  }
 }
 
 fn on_interaction_created(state: State, interaction: Interaction) {
