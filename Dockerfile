@@ -6,6 +6,8 @@ FROM ghcr.io/gleam-lang/gleam:${GLEAM_VERSION}-scratch AS gleam
 
 # Build stage
 FROM erlang:${ERLANG_VERSION}-alpine AS build
+# Add git so we can fetch the fork. This is temporary
+RUN apk add --no-cache git
 COPY --from=gleam /bin/gleam /bin/gleam
 COPY . /app/
 RUN cd /app && gleam export erlang-shipment
