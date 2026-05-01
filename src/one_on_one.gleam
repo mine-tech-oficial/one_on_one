@@ -120,7 +120,10 @@ pub fn start(
     |> static_supervisor.start
 
   case supervisor_start_result {
-    Ok(_) -> logging.log(logging.Info, "Started the gateway!")
+    Ok(actor.Started(pid:, ..)) -> {
+      let _ = process.register(pid, process.new_name("one_on_one"))
+      logging.log(logging.Info, "Started the gateway!")
+    }
     Error(err) ->
       logging.log(
         logging.Error,

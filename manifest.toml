@@ -18,7 +18,7 @@ packages = [
   { name = "gleam_time", version = "1.8.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleam_time", source = "hex", outer_checksum = "533D8723774D61AD4998324F5DD1DABDCDBFABAFB9E87CB5D03C6955448FC97D" },
   { name = "gleeunit", version = "1.10.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "gleeunit", source = "hex", outer_checksum = "254B697FE72EEAD7BF82E941723918E421317813AC49923EE76A18C788C61E72" },
   { name = "gramps", version = "6.0.1", build_tools = ["gleam"], requirements = ["gleam_crypto", "gleam_erlang", "gleam_http", "gleam_stdlib"], otp_app = "gramps", source = "hex", outer_checksum = "D55636072DEE173F6586A5679D3C02EC7A0DE3F8646B78C351B72908FF223DF7" },
-  { name = "graph", version = "1.0.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], source = "git", repo = "https://github.com/mine-tech-oficial/graph", commit = "56d850aa21f63192368c757f50ab9da3db14e084" },
+  { name = "graph", version = "1.0.1", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "graph", source = "hex", outer_checksum = "7363D6FD2A97C80DEDB9DFBEBD1786ADDDBC3718E051D88A2189F58400466BD1" },
   { name = "grom", version = "5.1.5", build_tools = ["gleam"], requirements = ["gleam_erlang", "gleam_http", "gleam_httpc", "gleam_json", "gleam_otp", "gleam_stdlib", "gleam_time", "multipart_form", "operating_system", "splitter", "status_code", "stratus"], source = "git", repo = "https://github.com/mine-tech-oficial/grom", commit = "e6dc48b412d2bc749f4753f2758c6d47e724e151" },
   { name = "logging", version = "1.5.0", build_tools = ["gleam"], requirements = ["gleam_stdlib"], otp_app = "logging", source = "hex", outer_checksum = "BC5F18CE5DD9686100229FE5409BDC3DD5C46D5A7DF2F804AD2D8F0DD6C5060E" },
   { name = "multipart_form", version = "1.1.0", build_tools = ["gleam"], requirements = ["gleam_http", "gleam_stdlib"], otp_app = "multipart_form", source = "hex", outer_checksum = "082C77A0C3BB1128FCD55491665E9B72BC943E849B67D02B08CFA6808AD8E47C" },
@@ -42,7 +42,7 @@ gleam_otp = { version = ">= 1.2.0 and < 2.0.0" }
 gleam_stdlib = { version = ">= 0.44.0 and < 2.0.0" }
 gleam_time = { version = ">= 1.7.0 and < 2.0.0" }
 gleeunit = { version = ">= 1.0.0 and < 2.0.0" }
-graph = { git = "https://github.com/mine-tech-oficial/graph", ref = "loosen-stdlib" }
+graph = { version = ">= 1.0.0 and < 2.0.0" }
 grom = { git = "https://github.com/mine-tech-oficial/grom", ref = "supervision" }
 logging = { version = ">= 1.3.0 and < 2.0.0" }
 prng = { version = ">= 5.1.0 and < 6.0.0" }

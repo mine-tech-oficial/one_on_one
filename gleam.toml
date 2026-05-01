@@ -25,10 +25,7 @@ logging = ">= 1.3.0 and < 2.0.0"
 gleam_json = ">= 3.1.0 and < 4.0.0"
 clockwork = ">= 4.0.0 and < 5.0.0"
 clockwork_schedule = ">= 2.0.0 and < 3.0.0"
-graph = {
-    git = "https://github.com/mine-tech-oficial/graph",
-    ref = "loosen-stdlib"
-}
+graph = ">= 1.0.0 and < 2.0.0"
 simplifile = ">= 2.4.0 and < 3.0.0"
 gleam_otp = ">= 1.2.0 and < 2.0.0"
 gleam_time = ">= 1.7.0 and < 2.0.0"
