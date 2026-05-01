@@ -1,10 +1,14 @@
 import clockwork
 import envoy
+import gleam/erlang/application
+import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/actor
+import gleam/otp/static_supervisor
+import gleam/otp/supervision
 import gleam/result
 import gleam/string
 import gleam/time/timestamp
@@ -39,6 +43,13 @@ type State {
 }
 
 pub fn main() -> Nil {
+  process.sleep_forever()
+}
+
+pub fn start(
+  _app: atom.Atom,
+  _type: application.StartType,
+) -> Result(process.Pid, actor.StartError) {
   logging.configure()
 
   let assert Ok(db_path) = envoy.get("DB_PATH")
@@ -73,39 +84,55 @@ pub fn main() -> Nil {
   let assert Ok(data) = gateway.get_data(client)
   let graph = result.unwrap(graph_db.load_graph(graph_db_path), graph.new())
 
-  let assert Ok(actor.Started(data: pairement_manager, ..)) =
-    pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
-    |> actor.start()
+  let gateway_name = process.new_name("gateway")
+  let pairement_name = process.new_name("pairement")
 
-  let gateway_start_result =
-    gateway.new(
-      State(
-        client,
-        string.split(admin_roles, on: ","),
-        graph_db_path,
-        graph_db_temp_path,
-        channel_id_path,
-        pairement_manager,
-        graph,
-      ),
+  let pairement_manager =
+    supervision.worker(fn() {
+      pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
+      |> actor.named(pairement_name)
+      |> actor.start()
+    })
+
+  let gateway =
+    gateway.new_with_initializer(
+      fn(_) {
+        Ok(State(
+          client,
+          string.split(admin_roles, on: ","),
+          graph_db_path,
+          graph_db_temp_path,
+          channel_id_path,
+          process.named_subject(pairement_name),
+          graph,
+        ))
+      },
       identify,
       data,
     )
     |> gateway.on_event(do: on_event)
-    |> gateway.start
+    |> gateway.supervised(gateway_name)
 
-  case gateway_start_result {
-    Ok(_) -> {
-      logging.log(logging.Info, "Started the gateway!")
-      process.sleep_forever()
-    }
-    Error(err) -> {
+  let supervisor_start_result =
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(pairement_manager)
+    |> static_supervisor.add(gateway)
+    |> static_supervisor.start
+
+  case supervisor_start_result {
+    Ok(_) -> logging.log(logging.Info, "Started the gateway!")
+    Error(err) ->
       logging.log(
         logging.Error,
         "Couldn't start the gateway: " <> string.inspect(err),
       )
-    }
   }
+  supervisor_start_result
+  |> result.map(fn(started) { started.pid })
+}
+
+pub fn stop(_state) -> atom.Atom {
+  atom.create("ok")
 }
 
 fn on_event(state: State, event: gateway.Event) {
