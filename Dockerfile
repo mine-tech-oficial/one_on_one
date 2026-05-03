@@ -18,6 +18,7 @@ ARG GIT_SHA
 ARG BUILD_TIME
 ENV GIT_SHA=${GIT_SHA}
 ENV BUILD_TIME=${BUILD_TIME}
+ENV ERL_FLAGS="-name one_on_one@127.0.0.1"
 COPY --from=build /app/build/erlang-shipment /app
 WORKDIR /app
 ENTRYPOINT ["/app/entrypoint.sh"]
