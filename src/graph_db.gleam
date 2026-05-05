@@ -30,7 +30,7 @@ pub fn load_graph(
 }
 
 pub fn save_graph(
-  graph: graph.Graph(_, _, _),
+  graph: graph.Graph(direction, value, label),
   path: String,
   tmp_path: String,
 ) -> Result(Nil, simplifile.FileError) {

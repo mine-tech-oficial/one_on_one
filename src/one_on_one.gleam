@@ -3,10 +3,14 @@ import envoy
 import gleam/erlang/application
 import gleam/erlang/atom
 import gleam/erlang/process
+import gleam/http
+import gleam/http/request.{type Request}
+import gleam/http/response.{type Response}
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/actor
+import gleam/otp/factory_supervisor
 import gleam/otp/static_supervisor
 import gleam/otp/supervision
 import gleam/result
@@ -20,26 +24,44 @@ import grom/component/action_row
 import grom/component/button
 import grom/component/text_display
 import grom/gateway
-import grom/gateway/intent
 import grom/guild_member
 import grom/interaction.{type Interaction}
 import grom/message
 import grom/modification
 import grom/user
 import logging
+import mist
 import pairement
 import simplifile
+import wisp
+import wisp/wisp_mist
 
-type State {
-  State(
+type RequestHandlerContext {
+  RequestHandlerContext(
+    client: grom.Client,
+    discord_public_key: String,
+    interaction_handler_name: process.Name(
+      factory_supervisor.Message(
+        Interaction,
+        process.Subject(InteractionHandlerMessage),
+      ),
+    ),
+  )
+}
+
+type InteractionHandlerContext {
+  InteractionHandlerContext(
     client: grom.Client,
     admin_roles: List(String),
     graph_db_path: String,
     graph_db_temp_path: String,
     channel_id_path: String,
     pairement_manager: process.Subject(pairement.PairementMsg),
-    user_connections: Graph(graph.Undirected, Nil, Nil),
   )
+}
+
+type InteractionHandlerMessage {
+  InteractionCreated(interaction: Interaction)
 }
 
 pub fn main() -> Nil {
@@ -58,7 +80,11 @@ pub fn start(
   let channel_id_path = db_path <> "/channel.txt"
 
   let assert Ok(token) = envoy.get("BOT_TOKEN")
+  let assert Ok(discord_application_id) = envoy.get("DISCORD_APPLICATION_ID")
+  let assert Ok(discord_public_key) = envoy.get("DISCORD_PUBLIC_KEY")
   let assert Ok(admin_roles) = envoy.get("ADMIN_ROLES")
+
+  let assert Ok(secret_key_base) = envoy.get("SECRET_KEY_BASE")
 
   let client = grom.Client(token:)
   let cron =
@@ -70,10 +96,6 @@ pub fn start(
       weekday: clockwork.exactly(0),
     )
 
-  let identify =
-    client
-    |> gateway.identify(intents: [intent.GuildMembers])
-
   let assert Ok(channel_id) =
     simplifile.read(channel_id_path)
     |> result.replace_error(Nil)
@@ -81,80 +103,8 @@ pub fn start(
 
   let _ = simplifile.write(channel_id, to: channel_id_path)
 
-  let assert Ok(data) = gateway.get_data(client)
-  let graph = result.unwrap(graph_db.load_graph(graph_db_path), graph.new())
-
-  let gateway_name = process.new_name("gateway")
+  let interaction_handler_name = process.new_name("interaction_handler_factory")
   let pairement_name = process.new_name("pairement")
-
-  let pairement_manager =
-    supervision.worker(fn() {
-      pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
-      |> actor.named(pairement_name)
-      |> actor.start()
-    })
-
-  let gateway =
-    gateway.new_with_initializer(
-      fn(_) {
-        Ok(State(
-          client,
-          string.split(admin_roles, on: ","),
-          graph_db_path,
-          graph_db_temp_path,
-          channel_id_path,
-          process.named_subject(pairement_name),
-          graph,
-        ))
-      },
-      identify,
-      data,
-    )
-    |> gateway.on_event(do: on_event)
-    |> gateway.supervised(gateway_name)
-
-  let supervisor_start_result =
-    static_supervisor.new(static_supervisor.OneForOne)
-    |> static_supervisor.add(pairement_manager)
-    |> static_supervisor.add(gateway)
-    |> static_supervisor.start
-
-  case supervisor_start_result {
-    Ok(actor.Started(pid:, ..)) -> {
-      let _ = process.register(pid, process.new_name("one_on_one"))
-      logging.log(logging.Info, "Started the gateway!")
-    }
-    Error(err) ->
-      logging.log(
-        logging.Error,
-        "Couldn't start the gateway: " <> string.inspect(err),
-      )
-  }
-  supervisor_start_result
-  |> result.map(fn(started) { started.pid })
-}
-
-pub fn stop(_state) -> atom.Atom {
-  atom.create("ok")
-}
-
-fn on_event(state: State, event: gateway.Event) {
-  case event {
-    gateway.ErrorEvent(error) -> {
-      logging.log(logging.Warning, string.inspect(error))
-      gateway.continue(state)
-    }
-    gateway.AllShardsReadyEvent(ready) -> on_ready(state, ready)
-    gateway.InteractionCreatedEvent(interaction) ->
-      on_interaction_created(state, interaction)
-    gateway.GuildMemberDeletedEvent(event) ->
-      on_guild_member_leave(state, event)
-    _ -> gateway.continue(state)
-  }
-}
-
-fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
-  logging.log(logging.Info, "Ready!")
 
   let global_commands = [
     command.CreateGlobalSlash(
@@ -264,81 +214,228 @@ fn on_ready(state: State, ready: gateway.AllShardsReadyMessage) {
     ),
   ]
 
-  let bulk_overwrite_result =
-    state.client
-    |> command.bulk_overwrite_global(
-      of: ready.application.id,
+  let assert Ok(_) =
+    command.bulk_overwrite_global(
+      client,
+      of: discord_application_id,
       new: global_commands,
     )
+  logging.log(
+    logging.Info,
+    "Overwrote the commands for " <> discord_application_id,
+  )
 
-  case bulk_overwrite_result {
-    Ok(_) -> {
-      logging.log(
-        logging.Info,
-        "Overwrote the commands for " <> ready.application.id,
-      )
+  let pairement_manager =
+    supervision.worker(fn() {
+      pairement.new(client, cron, channel_id, graph_db_path, graph_db_temp_path)
+      |> actor.named(pairement_name)
+      |> actor.start()
+    })
+
+  let interaction_handler_factory =
+    factory_supervisor.worker_child(start_interaction_handler(
+      InteractionHandlerContext(
+        client,
+        string.split(admin_roles, on: ","),
+        graph_db_path,
+        graph_db_temp_path,
+        channel_id_path,
+        process.named_subject(pairement_name),
+      ),
+      _,
+    ))
+    |> factory_supervisor.named(interaction_handler_name)
+    |> factory_supervisor.supervised
+
+  let http_server =
+    wisp_mist.handler(
+      handle_request(
+        _,
+        RequestHandlerContext(
+          client:,
+          discord_public_key:,
+          interaction_handler_name:,
+        ),
+      ),
+      secret_key_base,
+    )
+    |> mist.new
+    |> mist.port(2137)
+    |> mist.bind("0.0.0.0")
+    |> mist.supervised
+
+  let supervisor_start_result =
+    static_supervisor.new(static_supervisor.OneForOne)
+    |> static_supervisor.add(pairement_manager)
+    |> static_supervisor.add(interaction_handler_factory)
+    |> static_supervisor.add(http_server)
+    |> static_supervisor.start
+
+  case supervisor_start_result {
+    Ok(actor.Started(pid:, ..)) -> {
+      let _ = process.register(pid, process.new_name("one_on_one"))
+      logging.log(logging.Info, "Started the gateway!")
     }
-    Error(err) -> {
+    Error(err) ->
       logging.log(
         logging.Error,
-        "Couldn't bulk overwrite global commands: " <> string.inspect(err),
+        "Couldn't start the gateway: " <> string.inspect(err),
       )
+  }
+  supervisor_start_result
+  |> result.map(fn(started) { started.pid })
+}
+
+pub fn stop(_state) -> atom.Atom {
+  atom.create("ok")
+}
+
+fn handle_request(
+  req: Request(wisp.Connection),
+  context: RequestHandlerContext,
+) -> Response(wisp.Body) {
+  use <- wisp.log_request(req)
+  use <- wisp.rescue_crashes
+
+  case wisp.path_segments(req) {
+    ["discord-interactions"] -> {
+      use <- wisp.require_method(req, http.Post)
+      use body <- wisp.require_string_body(req)
+
+      interaction.handle_http_interaction_request(
+        request.Request(..req, body:),
+        context.discord_public_key,
+        fn(interaction) { handle_interaction_request(context, interaction) },
+      )
+      |> response.map(wisp.Text)
     }
+    _ -> wisp.not_found()
+  }
+}
+
+fn handle_interaction_request(
+  context: RequestHandlerContext,
+  interaction: Result(Interaction, interaction.HttpError),
+) -> Nil {
+  case interaction {
+    Ok(interaction) ->
+      handle_successful_interaction_request(context, interaction)
+    Error(interaction.CouldNotParseInteraction(_)) ->
+      logging.log(logging.Warning, "Could not parse interaction")
+    Error(interaction.CouldNotValidateSecurityHeaders(_)) ->
+      logging.log(logging.Warning, "Could not validate security headers")
+  }
+}
+
+fn handle_successful_interaction_request(
+  context: RequestHandlerContext,
+  interaction: Interaction,
+) -> Nil {
+  let factory = factory_supervisor.get_by_name(context.interaction_handler_name)
+
+  let start_result =
+    factory
+    |> factory_supervisor.start_child(interaction)
+
+  case start_result {
+    Ok(_) -> logging.log(logging.Info, "Started interaction handler worker")
+    Error(_) ->
+      logging.log(logging.Warning, "Could not start interaction handler worker")
+  }
+}
+
+fn start_interaction_handler(
+  context: InteractionHandlerContext,
+  interaction: Interaction,
+) -> Result(
+  actor.Started(process.Subject(InteractionHandlerMessage)),
+  actor.StartError,
+) {
+  actor.new_with_initialiser(4000, fn(subject) {
+    // Every actor has an associated selector.
+    // We must select our provided subject if we want to send messages to it.
+    let selector =
+      process.new_selector()
+      |> process.select(subject)
+
+    // Let's send a message on actor start-up.
+    process.send(subject, InteractionCreated(interaction))
+
+    actor.initialised(context)
+    |> actor.returning(subject)
+    |> actor.selecting(selector)
+    |> Ok
+  })
+  |> actor.on_message(handle_interaction_handler_message)
+  |> actor.start
+}
+
+fn handle_interaction_handler_message(
+  context: InteractionHandlerContext,
+  message: InteractionHandlerMessage,
+) -> actor.Next(InteractionHandlerContext, a) {
+  // We only deal with one type of message here,
+  // but the case statement exists for future-proofing.
+  case message {
+    InteractionCreated(interaction) -> handle_interaction(context, interaction)
+  }
+}
+
+// Finally, we get to handle our interaction.
+fn handle_interaction(
+  context: InteractionHandlerContext,
+  interaction: Interaction,
+) -> actor.Next(InteractionHandlerContext, a) {
+  case interaction.data {
+    interaction.CommandExecuted(command) ->
+      on_command_executed(context, interaction, command)
+    interaction.MessageComponentExecuted(message) ->
+      on_message_component_executed(context, interaction, message)
+    _ -> Nil
   }
 
-  gateway.continue(state)
+  actor.stop()
 }
 
 fn on_guild_member_leave(
-  state: State,
+  context: InteractionHandlerContext,
   event: gateway.GuildMemberDeletedMessage,
-) -> gateway.Next(State) {
+) -> Nil {
   case int.parse(event.user.id) {
     Ok(id) -> {
-      let user_connections = graph.remove_node(state.user_connections, id)
+      use graph <- load_graph(context.graph_db_path)
       case
         graph_db.save_graph(
-          user_connections,
-          state.graph_db_path,
-          state.graph_db_temp_path,
+          graph.remove_node(graph, id),
+          context.graph_db_path,
+          context.graph_db_temp_path,
         )
       {
         Ok(_) -> Nil
         Error(_) -> logging.log(logging.Error, "Couldn't save graph")
       }
-      gateway.continue(State(..state, user_connections:))
     }
-    Error(_) -> gateway.continue(state)
-  }
-}
-
-fn on_interaction_created(state: State, interaction: Interaction) {
-  case interaction.data {
-    interaction.CommandExecuted(command) ->
-      on_command_executed(state, interaction, command)
-    interaction.MessageComponentExecuted(message) ->
-      on_message_component_executed(state, interaction, message)
-    _ -> gateway.continue(state)
+    Error(_) -> Nil
   }
 }
 
 fn on_command_executed(
-  state: State,
+  context: InteractionHandlerContext,
   interaction: Interaction,
   command: interaction.CommandExecution,
 ) {
   case command {
     interaction.SlashCommandExecuted(command) ->
-      on_slash_command_executed(state, interaction, command)
-    _ -> gateway.continue(state)
+      on_slash_command_executed(context, interaction, command)
+    _ -> Nil
   }
 }
 
 fn on_message_component_executed(
-  state: State,
+  context: InteractionHandlerContext,
   interaction: Interaction,
   message: interaction.MessageComponentExecution,
-) -> gateway.Next(State) {
+) -> Nil {
   case message {
     interaction.ButtonExecuted(interaction.ButtonExecution(
       custom_id: "cancel-erase-list",
@@ -357,10 +454,10 @@ fn on_message_component_executed(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(state)
+      Nil
     }
     interaction.ButtonExecuted(interaction.ButtonExecution(
       custom_id: "confirm-erase-list",
@@ -369,8 +466,8 @@ fn on_message_component_executed(
       let message = case
         graph_db.save_graph(
           graph.new(),
-          state.graph_db_path,
-          state.graph_db_temp_path,
+          context.graph_db_path,
+          context.graph_db_temp_path,
         )
       {
         Ok(_) -> ":white_check_mark: Lista limpada com sucesso."
@@ -391,49 +488,51 @@ fn on_message_component_executed(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(State(..state, user_connections: graph.new()))
+      Nil
     }
-    _ -> gateway.continue(state)
+    _ -> Nil
   }
 }
 
 fn on_slash_command_executed(
-  state: State,
+  context: InteractionHandlerContext,
   interaction: Interaction,
   command: interaction.SlashCommandExecution,
 ) {
   case command.name {
-    "register" -> on_register_command(state, interaction, command)
-    "manage" -> on_manage_command(state, interaction, command)
-    _ -> gateway.continue(state)
+    "register" -> on_register_command(context, interaction, command)
+    "manage" -> on_manage_command(context, interaction, command)
+    _ -> Nil
   }
 }
 
 fn on_register_command(
-  state: State,
+  context: InteractionHandlerContext,
   interaction: Interaction,
   command: interaction.SlashCommandExecution,
 ) {
-  use _, user <- get_guild_invokation(state, interaction.invokement_info)
+  use _, user <- get_guild_invokation(interaction.invokement_info)
   case command.options {
     [interaction.SubCommandSlashCommandOption(name: "entrar", ..)] -> {
+      use graph <- load_graph(context.graph_db_path)
+
       let user_connections = case int.parse(user.id) {
         Ok(id) ->
-          graph.insert_node(state.user_connections, graph.Node(id, Nil))
-          |> list.fold(graph.nodes(state.user_connections), _, fn(acc, node) {
+          graph.insert_node(graph, graph.Node(id, Nil))
+          |> list.fold(graph.nodes(graph), _, fn(acc, node) {
             graph.insert_undirected_edge(acc, Nil, node.id, id)
           })
-        Error(_) -> state.user_connections
+        Error(_) -> graph
       }
 
       let message = case
         graph_db.save_graph(
           user_connections,
-          state.graph_db_path,
-          state.graph_db_temp_path,
+          context.graph_db_path,
+          context.graph_db_temp_path,
         )
       {
         Ok(_) -> ":white_check_mark: Você foi registrado na lista!"
@@ -453,22 +552,23 @@ fn on_register_command(
         )
 
       let _response_result =
-        state.client
-        |> interaction.respond(to: interaction, using: response)
+        context.client |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(State(..state, user_connections:))
+      Nil
     }
     [interaction.SubCommandSlashCommandOption(name: "sair", ..)] -> {
+      use graph <- load_graph(context.graph_db_path)
+
       let user_connections = case int.parse(user.id) {
-        Ok(id) -> graph.remove_node(state.user_connections, id)
-        Error(_) -> state.user_connections
+        Ok(id) -> graph.remove_node(graph, id)
+        Error(_) -> graph
       }
 
       let message = case
         graph_db.save_graph(
           user_connections,
-          state.graph_db_path,
-          state.graph_db_temp_path,
+          context.graph_db_path,
+          context.graph_db_temp_path,
         )
       {
         Ok(_) -> ":wave: Você foi removido da lista."
@@ -488,27 +588,29 @@ fn on_register_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(State(..state, user_connections:))
+      Nil
     }
-    _ -> gateway.continue(state)
+    _ -> Nil
   }
 }
 
 fn on_manage_command(
-  state: State,
+  context: InteractionHandlerContext,
   interaction: Interaction,
   command: interaction.SlashCommandExecution,
-) -> gateway.Next(State) {
-  use member, _ <- get_guild_invokation(state, interaction.invokement_info)
-  use <- check_user_is_privileged(state, member, interaction)
+) -> Nil {
+  use member, _ <- get_guild_invokation(interaction.invokement_info)
+  use <- check_user_is_privileged(context, member, interaction)
   case command.options {
     [interaction.SubCommandSlashCommandOption(name: "listar-usuarios", ..)] -> {
+      use graph <- load_graph(context.graph_db_path)
+
       let message =
         list.fold(
-          graph.nodes(state.user_connections),
+          graph.nodes(graph),
           "Aqui estão os usuários na lista:",
           fn(acc, user) { acc <> "\n" <> "<@" <> int.to_string(user.id) <> ">" },
         )
@@ -522,9 +624,10 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
-      gateway.continue(state)
+
+      Nil
     }
     [interaction.SubCommandSlashCommandOption(name: "limpar-lista", ..)] -> {
       let response =
@@ -564,9 +667,9 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
-      gateway.continue(state)
+      Nil
     }
     [
       interaction.SubCommandSlashCommandOption(
@@ -576,20 +679,22 @@ fn on_manage_command(
         ],
       ),
     ] -> {
+      use graph <- load_graph(context.graph_db_path)
+
       let user_connections = case int.parse(user_id) {
         Ok(id) ->
-          graph.insert_node(state.user_connections, graph.Node(id, Nil))
-          |> list.fold(graph.nodes(state.user_connections), _, fn(acc, node) {
+          graph.insert_node(graph, graph.Node(id, Nil))
+          |> list.fold(graph.nodes(graph), _, fn(acc, node) {
             graph.insert_undirected_edge(acc, Nil, node.id, id)
           })
-        Error(_) -> state.user_connections
+        Error(_) -> graph
       }
 
       let message = case
         graph_db.save_graph(
           user_connections,
-          state.graph_db_path,
-          state.graph_db_temp_path,
+          context.graph_db_path,
+          context.graph_db_temp_path,
         )
       {
         Ok(_) -> ":white_check_mark: Usuário adicionado com sucesso."
@@ -608,10 +713,10 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(State(..state, user_connections:))
+      Nil
     }
     [
       interaction.SubCommandSlashCommandOption(
@@ -621,16 +726,18 @@ fn on_manage_command(
         ],
       ),
     ] -> {
+      use graph <- load_graph(context.graph_db_path)
+
       let user_connections = case int.parse(user_id) {
-        Ok(id) -> graph.remove_node(state.user_connections, id)
-        Error(_) -> state.user_connections
+        Ok(id) -> graph.remove_node(graph, id)
+        Error(_) -> graph
       }
 
       let message = case
         graph_db.save_graph(
           user_connections,
-          state.graph_db_path,
-          state.graph_db_temp_path,
+          context.graph_db_path,
+          context.graph_db_temp_path,
         )
       {
         Ok(_) -> ":white_check_mark: Usuário removido com sucesso."
@@ -649,14 +756,18 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(State(..state, user_connections:))
+      Nil
     }
     [interaction.SubCommandSlashCommandOption(name: "proximo-pareamento", ..)] -> {
       let next_occurrence =
-        process.call(state.pairement_manager, 3000, pairement.GetNextPairement)
+        process.call(
+          context.pairement_manager,
+          3000,
+          pairement.GetNextPairement,
+        )
       let #(unix_seconds, _) =
         timestamp.to_unix_seconds_and_nanoseconds(next_occurrence)
       let response =
@@ -669,9 +780,9 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
-      gateway.continue(state)
+      Nil
     }
     [interaction.SubCommandSlashCommandOption(name: "testar-pareamento", ..)] -> {
       let response =
@@ -682,11 +793,15 @@ fn on_manage_command(
           ),
         )
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
       let msg =
-        process.call(state.pairement_manager, 3000, pairement.SimulatePairement)
+        process.call(
+          context.pairement_manager,
+          3000,
+          pairement.SimulatePairement,
+        )
 
       let response =
         interaction.ModifyOriginalResponse(
@@ -695,13 +810,13 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.modify_original_response(
           of: interaction,
           using: response,
         )
 
-      gateway.continue(state)
+      Nil
     }
     [interaction.SubCommandSlashCommandOption(name: "fazer-pareamento", ..)] -> {
       let response =
@@ -709,11 +824,11 @@ fn on_manage_command(
           interaction.new_response_message(),
         )
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
       let msg =
-        process.call(state.pairement_manager, 3000, pairement.RunPairementMsg)
+        process.call(context.pairement_manager, 3000, pairement.RunPairementMsg)
 
       let response =
         interaction.ModifyOriginalResponse(
@@ -722,13 +837,13 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.modify_original_response(
           of: interaction,
           using: response,
         )
 
-      gateway.continue(state)
+      Nil
     }
     [
       interaction.SubCommandSlashCommandOption(
@@ -739,11 +854,11 @@ fn on_manage_command(
       ),
     ] -> {
       let message = case
-        simplifile.write(to: state.channel_id_path, contents: channel_id)
+        simplifile.write(to: context.channel_id_path, contents: channel_id)
       {
         Ok(_) -> {
           process.send(
-            state.pairement_manager,
+            context.pairement_manager,
             pairement.SetChannelId(channel_id:),
           )
           ":white_check_mark: Canal alterado com sucesso."
@@ -764,37 +879,36 @@ fn on_manage_command(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
 
-      gateway.continue(state)
+      Nil
     }
-    _ -> gateway.continue(state)
+    _ -> Nil
   }
 }
 
 fn get_guild_invokation(
-  state: State,
   invokement_info: interaction.InvokementInfo,
-  f: fn(guild_member.GuildMember, user.User) -> gateway.Next(State),
-) -> gateway.Next(State) {
+  fun: fn(guild_member.GuildMember, user.User) -> Nil,
+) -> Nil {
   case invokement_info {
     interaction.InvokedInGuild(
       member: guild_member.Member(user: Some(user), ..) as member,
       ..,
-    ) -> f(member, user)
-    _ -> gateway.continue(state)
+    ) -> fun(member, user)
+    _ -> Nil
   }
 }
 
 fn check_user_is_privileged(
-  state: State,
+  context: InteractionHandlerContext,
   member: guild_member.GuildMember,
   interaction: Interaction,
-  f: fn() -> gateway.Next(State),
-) -> gateway.Next(State) {
+  fun: fn() -> Nil,
+) -> Nil {
   case
-    list.fold(state.admin_roles, False, fn(acc, role) {
+    list.fold(context.admin_roles, False, fn(acc, role) {
       acc || list.contains(member.roles, role)
     })
   {
@@ -809,10 +923,20 @@ fn check_user_is_privileged(
         )
 
       let _response_result =
-        state.client
+        context.client
         |> interaction.respond(to: interaction, using: response)
-      gateway.continue(state)
+      Nil
     }
-    True -> f()
+    True -> fun()
+  }
+}
+
+fn load_graph(
+  graph_db_path: String,
+  fun: fn(Graph(graph.Undirected, Nil, Nil)) -> Nil,
+) -> Nil {
+  case graph_db.load_graph(graph_db_path) {
+    Ok(graph) -> fun(graph)
+    Error(_) -> logging.log(logging.Error, "Couldn't load graph")
   }
 }
