@@ -53,8 +53,8 @@ pub fn new(
     process.send_after(
       self,
       duration.to_milliseconds(timestamp.difference(
-        next_occurrence,
         timestamp.system_time(),
+        next_occurrence,
       )),
       RunPairement,
     )
@@ -154,12 +154,12 @@ fn on_message(
       process.send_after(
         self,
         duration.to_milliseconds(timestamp.difference(
+          timestamp.system_time(),
           clockwork.next_occurrence(
             given: cron,
             from: timestamp.system_time(),
             with_offset: duration.hours(-3),
           ),
-          timestamp.system_time(),
         )),
         RunPairement,
       )
