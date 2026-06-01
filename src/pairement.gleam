@@ -27,7 +27,11 @@ pub type State {
   State(
     has_already_happened: Bool,
     seed: random.Seed,
+    client: grom.Client,
+    cron: clockwork.Cron,
     channel_id: String,
+    graph_db_path: String,
+    graph_temp_path: String,
     self: process.Subject(PairementMsg),
   )
 }
@@ -40,6 +44,20 @@ pub fn new(
   graph_temp_path: String,
 ) -> actor.Builder(State, PairementMsg, process.Subject(PairementMsg)) {
   actor.new_with_initialiser(1000, fn(self) {
+    let next_occurrence =
+      clockwork.next_occurrence(
+        given: cron,
+        from: timestamp.system_time(),
+        with_offset: duration.hours(-3),
+      )
+    process.send_after(
+      self,
+      duration.to_milliseconds(timestamp.difference(
+        next_occurrence,
+        timestamp.system_time(),
+      )),
+      RunPairement,
+    )
     Ok(
       actor.initialised(State(
         has_already_happened: False,
@@ -48,101 +66,108 @@ pub fn new(
         ),
         channel_id:,
         self:,
+        client:,
+        cron:,
+        graph_db_path:,
+        graph_temp_path:,
       ))
       |> actor.returning(self),
     )
   })
-  |> actor.on_message(fn(state, msg) {
-    let State(has_already_happened:, seed:, channel_id:, self:) = state
-    let next_occurrence = case has_already_happened {
-      False ->
-        clockwork.next_occurrence(
-          given: cron,
-          from: timestamp.system_time(),
-          with_offset: duration.hours(-3),
-        )
+  |> actor.on_message(on_message)
+}
 
-      True ->
-        clockwork.next_occurrence(
-          given: cron,
-          from: timestamp.system_time(),
-          with_offset: duration.hours(-3),
-        )
-        |> clockwork.next_occurrence(
-          given: cron,
-          from: _,
-          with_offset: duration.hours(-3),
-        )
+fn on_message(
+  state: State,
+  msg: PairementMsg,
+) -> actor.Next(State, PairementMsg) {
+  let State(
+    has_already_happened:,
+    seed:,
+    channel_id:,
+    self:,
+    client:,
+    cron:,
+    graph_db_path:,
+    graph_temp_path:,
+  ) = state
+  let next_occurrence = case has_already_happened {
+    False ->
+      clockwork.next_occurrence(
+        given: cron,
+        from: timestamp.system_time(),
+        with_offset: duration.hours(-3),
+      )
+
+    True ->
+      clockwork.next_occurrence(
+        given: cron,
+        from: timestamp.system_time(),
+        with_offset: duration.hours(-3),
+      )
+      |> clockwork.next_occurrence(
+        given: cron,
+        from: _,
+        with_offset: duration.hours(-3),
+      )
+  }
+  case msg {
+    SetChannelId(channel_id) -> actor.continue(State(..state, channel_id:))
+    GetNextPairement(reply_to:) -> {
+      process.send(reply_to, next_occurrence)
+      actor.continue(state)
     }
-    case msg {
-      SetChannelId(channel_id) -> actor.continue(State(..state, channel_id:))
-      GetNextPairement(reply_to:) -> {
-        process.send(reply_to, next_occurrence)
-        actor.continue(state)
+    SimulatePairement(reply_to:) -> {
+      let _ =
+        result.map(graph_db.load_graph(graph_db_path), fn(graph) {
+          let #(msg, _, _) = get_pairing(graph, seed)
+          process.send(reply_to, msg)
+        })
+      actor.continue(state)
+    }
+    RunPairementMsg(reply_to:) -> {
+      let assert Ok(seed) = {
+        use graph <- result.try(graph_db.load_graph(graph_db_path))
+        let #(msg, graph, seed) = get_pairing(graph, seed)
+        let _ = graph_db.save_graph(graph, graph_db_path, graph_temp_path)
+        process.send(reply_to, msg)
+        Ok(seed)
       }
-      SimulatePairement(reply_to:) -> {
-        let _ =
-          result.map(graph_db.load_graph(graph_db_path), fn(graph) {
-            let #(msg, _, _) = get_pairing(graph, seed)
-            process.send(reply_to, msg)
-          })
-        actor.continue(state)
-      }
-      RunPairementMsg(reply_to:) -> {
-        let assert Ok(seed) = {
+      actor.continue(State(..state, has_already_happened: True, seed:))
+    }
+    RunPairement -> {
+      let assert Ok(seed) = case has_already_happened {
+        False -> {
           use graph <- result.try(graph_db.load_graph(graph_db_path))
           let #(msg, graph, seed) = get_pairing(graph, seed)
           let _ = graph_db.save_graph(graph, graph_db_path, graph_temp_path)
-          process.send(reply_to, msg)
+          let _ =
+            message.create(
+              client,
+              in: channel_id,
+              using: message.Create(..message.new_create(), content: Some(msg)),
+            )
           Ok(seed)
         }
-        actor.continue(State(
-          has_already_happened: True,
-          seed:,
-          channel_id:,
-          self:,
-        ))
+        True -> Ok(seed)
       }
-      RunPairement -> {
-        let assert Ok(seed) = case has_already_happened {
-          False -> {
-            use graph <- result.try(graph_db.load_graph(graph_db_path))
-            let #(msg, graph, seed) = get_pairing(graph, seed)
-            let _ = graph_db.save_graph(graph, graph_db_path, graph_temp_path)
-            let _ =
-              message.create(
-                client,
-                in: channel_id,
-                using: message.Create(
-                  ..message.new_create(),
-                  content: Some(msg),
-                ),
-              )
-            Ok(seed)
-          }
-          True -> Ok(seed)
-        }
-        process.send_after(
-          self,
-          duration.to_milliseconds(timestamp.difference(
-            clockwork.next_occurrence(
-              given: cron,
-              from: timestamp.system_time(),
-              with_offset: duration.hours(-3),
-            ),
-            timestamp.system_time(),
-          )),
-          RunPairement,
-        )
-        actor.continue(State(
-          has_already_happened: !has_already_happened,
-          seed:,
-          channel_id:,
-          self:,
-        ))
-      }
+      process.send_after(
+        self,
+        duration.to_milliseconds(timestamp.difference(
+          clockwork.next_occurrence(
+            given: cron,
+            from: timestamp.system_time(),
+            with_offset: duration.hours(-3),
+          ),
+          timestamp.system_time(),
+        )),
+        RunPairement,
+      )
+      actor.continue(
+        State(..state, has_already_happened: !has_already_happened, seed:),
+      )
     }
-  })
+  }
 }
 
 fn get_pairing(

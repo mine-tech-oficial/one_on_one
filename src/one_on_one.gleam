@@ -93,7 +93,7 @@ pub fn start(
       hour: clockwork.exactly(12),
       day: clockwork.every_time(),
       month: clockwork.every_time(),
-      weekday: clockwork.exactly(0),
+      weekday: clockwork.exactly(1),
     )
 
   let assert Ok(channel_id) =
