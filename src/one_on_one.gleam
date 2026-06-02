@@ -1,3 +1,4 @@
+import app
 import clockwork
 import envoy
 import gleam/erlang/application
@@ -17,14 +18,14 @@ import gleam/result
 import gleam/string
 import gleam/time/timestamp
 import graph.{type Graph}
-import graph_db
+import graph_db.{UserData}
 import grom
 import grom/command
 import grom/component/action_row
 import grom/component/button
 import grom/component/text_display
 import grom/gateway
-import grom/guild_member
+import grom/guild_member.{Member}
 import grom/interaction.{type Interaction}
 import grom/message
 import grom/modification
@@ -46,6 +47,7 @@ type RequestHandlerContext {
         process.Subject(InteractionHandlerMessage),
       ),
     ),
+    graph_db_path: String,
   )
 }
 
@@ -255,6 +257,7 @@ pub fn start(
           client:,
           discord_public_key:,
           interaction_handler_name:,
+          graph_db_path:,
         ),
       ),
       secret_key_base,
@@ -309,6 +312,7 @@ fn handle_request(
       )
       |> response.map(wisp.Text)
     }
+    ["dashboard"] -> app.handle_request(req, context.graph_db_path)
     _ -> wisp.not_found()
   }
 }
@@ -514,14 +518,20 @@ fn on_register_command(
   interaction: Interaction,
   command: interaction.SlashCommandExecution,
 ) {
-  use _, user <- get_guild_invokation(interaction.invokement_info)
+  use _, member, user <- get_guild_invokation(interaction.invokement_info)
   case command.options {
     [interaction.SubCommandSlashCommandOption(name: "entrar", ..)] -> {
       use graph <- load_graph(context.graph_db_path)
 
       let user_connections = case int.parse(user.id) {
         Ok(id) ->
-          graph.insert_node(graph, graph.Node(id, Nil))
+          graph.insert_node(
+            graph,
+            graph.Node(
+              id,
+              UserData(username: option.unwrap(member.nick, user.username)),
+            ),
+          )
           |> list.fold(graph.nodes(graph), _, fn(acc, node) {
             graph.insert_undirected_edge(acc, Nil, node.id, id)
           })
@@ -602,7 +612,7 @@ fn on_manage_command(
   interaction: Interaction,
   command: interaction.SlashCommandExecution,
 ) -> Nil {
-  use member, _ <- get_guild_invokation(interaction.invokement_info)
+  use guild_id, member, _ <- get_guild_invokation(interaction.invokement_info)
   use <- check_user_is_privileged(context, member, interaction)
   case command.options {
     [interaction.SubCommandSlashCommandOption(name: "listar-usuarios", ..)] -> {
@@ -681,42 +691,54 @@ fn on_manage_command(
     ] -> {
       use graph <- load_graph(context.graph_db_path)
 
-      let user_connections = case int.parse(user_id) {
-        Ok(id) ->
-          graph.insert_node(graph, graph.Node(id, Nil))
-          |> list.fold(graph.nodes(graph), _, fn(acc, node) {
-            graph.insert_undirected_edge(acc, Nil, node.id, id)
-          })
-        Error(_) -> graph
-      }
+      case guild_member.get(context.client, guild_id, user_id) {
+        Error(_) | Ok(Member(user: option.None, ..)) ->
+          logging.log(logging.Error, "Couldn't get user")
+        Ok(Member(user: option.Some(user), ..)) -> {
+          let user_connections = case int.parse(user_id) {
+            Ok(id) ->
+              graph.insert_node(
+                graph,
+                graph.Node(
+                  id,
+                  UserData(option.unwrap(member.nick, user.username)),
+                ),
+              )
+              |> list.fold(graph.nodes(graph), _, fn(acc, node) {
+                graph.insert_undirected_edge(acc, Nil, node.id, id)
+              })
+            Error(_) -> graph
+          }
 
-      let message = case
-        graph_db.save_graph(
-          user_connections,
-          context.graph_db_path,
-          context.graph_db_temp_path,
-        )
-      {
-        Ok(_) -> ":white_check_mark: Usuário adicionado com sucesso."
-        Error(_) -> {
-          logging.log(logging.Error, "Couldn't save graph")
-          ":x: Ocorreu um erro interno."
+          let message = case
+            graph_db.save_graph(
+              user_connections,
+              context.graph_db_path,
+              context.graph_db_temp_path,
+            )
+          {
+            Ok(_) -> ":white_check_mark: Usuário adicionado com sucesso."
+            Error(_) -> {
+              logging.log(logging.Error, "Couldn't save graph")
+              ":x: Ocorreu um erro interno."
+            }
+          }
+          let response =
+            interaction.RespondWithChannelMessageWithSource(
+              interaction.ResponseMessage(
+                ..interaction.new_response_message(),
+                content: Some(message),
+                flags: Some([interaction.EphemeralResponseMessage]),
+              ),
+            )
+
+          let _response_result =
+            context.client
+            |> interaction.respond(to: interaction, using: response)
+
+          Nil
         }
       }
-      let response =
-        interaction.RespondWithChannelMessageWithSource(
-          interaction.ResponseMessage(
-            ..interaction.new_response_message(),
-            content: Some(message),
-            flags: Some([interaction.EphemeralResponseMessage]),
-          ),
-        )
-
-      let _response_result =
-        context.client
-        |> interaction.respond(to: interaction, using: response)
-
-      Nil
     }
     [
       interaction.SubCommandSlashCommandOption(
@@ -890,13 +912,14 @@ fn on_manage_command(
 
 fn get_guild_invokation(
   invokement_info: interaction.InvokementInfo,
-  fun: fn(guild_member.GuildMember, user.User) -> Nil,
+  fun: fn(String, guild_member.GuildMember, user.User) -> Nil,
 ) -> Nil {
   case invokement_info {
     interaction.InvokedInGuild(
-      member: guild_member.Member(user: Some(user), ..) as member,
+      guild_id:,
+      member: Member(user: Some(user), ..) as member,
       ..,
-    ) -> fun(member, user)
+    ) -> fun(guild_id, member, user)
     _ -> Nil
   }
 }
@@ -933,7 +956,7 @@ fn check_user_is_privileged(
 
 fn load_graph(
   graph_db_path: String,
-  fun: fn(Graph(graph.Undirected, Nil, Nil)) -> Nil,
+  fun: fn(Graph(graph.Undirected, graph_db.UserData, Nil)) -> Nil,
 ) -> Nil {
   case graph_db.load_graph(graph_db_path) {
     Ok(graph) -> fun(graph)
