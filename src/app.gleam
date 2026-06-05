@@ -142,6 +142,7 @@ fn delete_user(
   graph_db_path: String,
   graph_db_temp_path: String,
 ) -> wisp.Response {
+  use <- require_authentication(req)
   use <- wisp.require_method(req, http.Post)
   use formdata <- wisp.require_form(req)
 
@@ -167,5 +168,15 @@ fn delete_user(
       }
     }
     _ -> wisp.unprocessable_content()
+  }
+}
+
+fn require_authentication(
+  req: wisp.Request,
+  fun: fn() -> wisp.Response,
+) -> wisp.Response {
+  case wisp.get_cookie(req, "session", wisp.Signed) {
+    Ok(_) -> fun()
+    Error(_) -> wisp.response(403)
   }
 }
