@@ -47,7 +47,9 @@ type RequestHandlerContext {
         process.Subject(InteractionHandlerMessage),
       ),
     ),
+    master_password: String,
     graph_db_path: String,
+    graph_db_temp_path: String,
   )
 }
 
@@ -85,6 +87,7 @@ pub fn start(
   let assert Ok(discord_application_id) = envoy.get("DISCORD_APPLICATION_ID")
   let assert Ok(discord_public_key) = envoy.get("DISCORD_PUBLIC_KEY")
   let assert Ok(admin_roles) = envoy.get("ADMIN_ROLES")
+  let assert Ok(master_password) = envoy.get("MASTER_PASSWORD")
 
   let assert Ok(secret_key_base) = envoy.get("SECRET_KEY_BASE")
 
@@ -257,7 +260,9 @@ pub fn start(
           client:,
           discord_public_key:,
           interaction_handler_name:,
+          master_password:,
           graph_db_path:,
+          graph_db_temp_path:,
         ),
       ),
       secret_key_base,
@@ -312,8 +317,13 @@ fn handle_request(
       )
       |> response.map(wisp.Text)
     }
-    ["dashboard"] -> app.handle_request(req, context.graph_db_path)
-    _ -> wisp.not_found()
+    _ ->
+      app.handle_request(
+        req,
+        context.master_password,
+        context.graph_db_path,
+        context.graph_db_temp_path,
+      )
   }
 }
 
