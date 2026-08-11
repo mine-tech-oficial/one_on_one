@@ -95,7 +95,7 @@ pub fn start(
   let cron =
     clockwork.Cron(
       minute: clockwork.exactly(0),
-      hour: clockwork.exactly(12),
+      hour: clockwork.exactly(9),
       day: clockwork.every_time(),
       month: clockwork.every_time(),
       weekday: clockwork.exactly(1),
